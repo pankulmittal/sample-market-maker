@@ -9,12 +9,7 @@ import logging
 BASE_URL = "https://testnet.bitmex.com/api/v1/"
 # BASE_URL = "https://www.bitmex.com/api/v1/" # Once you're ready, uncomment this.
 
-# Credentials
-LOGIN = "test@test.com"
-PASSWORD = "password"
-OTPTOKEN = ""  # OTP token, if enabled (Google Authenticator)
-
-# If using permanent API keys, leave the above as blank strings and fill these out.
+# The BitMEX API requires permanent API keys. Go to https://testnet.bitmex.com/api/apiKeys to fill these out.
 API_KEY = ""
 API_SECRET = ""
 
@@ -50,11 +45,16 @@ MIN_SPREAD = 0.01
 # rather than starting in the middle and killing potentially profitable spreads.
 MAINTAIN_SPREADS = True
 
+# This number defines far much the price of an existing order can be from a desired order before it is amended.
+# This is useful for avoiding unnecessary calls and maintaining your ratelimits.
+#
+# Further information:
 # Each order is designed to be (INTERVAL*n)% away from the spread.
 # If the spread changes and the order has moved outside its bound defined as
-# (INTERVAL*n) - RELIST_INTERVAL < current_spread < (INTERVAL*n) + RELIST+INTERVAL
+# abs((desired_order['price'] / order['price']) - 1) > settings.RELIST_INTERVAL)
 # it will be resubmitted.
-# 0.01 = 1%
+#
+# 0.01 == 1%
 RELIST_INTERVAL = 0.01
 
 
@@ -68,6 +68,11 @@ CHECK_POSITION_LIMITS = False
 MIN_POSITION = -10000
 MAX_POSITION = 10000
 
+# If True, will only send orders that rest in the book (ExecInst: ParticipateDoNotInitiate).
+# Use to guarantee a maker rebate.
+# However -- orders that would have matched immediately will instead cancel, and you may end up with
+# unexpected delta. Be careful.
+POST_ONLY = False
 
 ########################################################################################################################
 # Misc Behavior, Technicals

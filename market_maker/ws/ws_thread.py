@@ -2,12 +2,15 @@ import sys
 import websocket
 import threading
 import traceback
+import ssl
 from time import sleep
 import json
 import decimal
 import logging
 from market_maker.settings import settings
 from market_maker.auth.APIKeyAuth import generate_nonce, generate_signature
+from market_maker.utils.log import setup_custom_logger
+from market_maker.utils.math import toNearest
 from future.utils import iteritems
 from future.standard_library import hooks
 with hooks():  # Python 2/3 compat
@@ -30,6 +33,9 @@ class BitMEXWebsocket():
     def __init__(self):
         self.logger = logging.getLogger('root')
         self.__reset()
+
+    def __del__(self):
+        self.exit()
 
     def connect(self, endpoint="", symbol="XBTN15", shouldAuth=True):
         '''Connect to the websocket and initialize data stores.'''
@@ -96,7 +102,7 @@ class BitMEXWebsocket():
             }
 
         # The instrument has a tickSize. Use it to round values.
-        return {k: round(float(v or 0), instrument['tickLog']) for k, v in iteritems(ticker)}
+        return {k: toNearest(float(v or 0), instrument['tickSize']) for k, v in iteritems(ticker)}
 
     def funds(self):
         return self.data['margin'][0]
@@ -141,15 +147,18 @@ class BitMEXWebsocket():
         '''Connect to the websocket in a thread.'''
         self.logger.debug("Starting thread")
 
+        ssl_defaults = ssl.get_default_verify_paths()
+        sslopt_ca_certs = {'ca_certs': ssl_defaults.cafile}
         self.ws = websocket.WebSocketApp(wsURL,
                                          on_message=self.__on_message,
                                          on_close=self.__on_close,
                                          on_open=self.__on_open,
                                          on_error=self.__on_error,
-                                         # We can login using email/pass or API key
-                                         header=self.__get_auth())
+                                         header=self.__get_auth()
+                                         )
 
-        self.wst = threading.Thread(target=lambda: self.ws.run_forever())
+        setup_custom_logger('websocket', log_level=settings.LOG_LEVEL)
+        self.wst = threading.Thread(target=lambda: self.ws.run_forever(sslopt=sslopt_ca_certs))
         self.wst.daemon = True
         self.wst.start()
         self.logger.info("Started thread")
@@ -171,22 +180,15 @@ class BitMEXWebsocket():
         if self.shouldAuth is False:
             return []
 
-        if not settings.API_KEY:
-            self.logger.info("Authenticating with email/password.")
-            return [
-                "email: " + settings.LOGIN,
-                "password: " + settings.PASSWORD
-            ]
-        else:
-            self.logger.info("Authenticating with API Key.")
-            # To auth to the WS using an API key, we generate a signature of a nonce and
-            # the WS API endpoint.
-            nonce = generate_nonce()
-            return [
-                "api-nonce: " + str(nonce),
-                "api-signature: " + generate_signature(settings.API_SECRET, 'GET', '/realtime', nonce, ''),
-                "api-key:" + settings.API_KEY
-            ]
+        self.logger.info("Authenticating with API Key.")
+        # To auth to the WS using an API key, we generate a signature of a nonce and
+        # the WS API endpoint.
+        nonce = generate_nonce()
+        return [
+            "api-nonce: " + str(nonce),
+            "api-signature: " + generate_signature(settings.API_SECRET, 'GET', '/realtime', nonce, ''),
+            "api-key:" + settings.API_KEY
+        ]
 
     def __wait_for_account(self):
         '''On subscribe, this data will come down. Wait for it.'''
@@ -199,9 +201,9 @@ class BitMEXWebsocket():
         while not {'instrument', 'trade', 'quote'} <= set(self.data):
             sleep(0.1)
 
-    def __send_command(self, command, args=[]):
+    def __send_command(self, command, args):
         '''Send a raw command.'''
-        self.ws.send(json.dumps({"op": command, "args": args}))
+        self.ws.send(json.dumps({"op": command, "args": args or []}))
 
     def __on_message(self, ws, message):
         '''Handler for parsing WS messages.'''
@@ -221,7 +223,7 @@ class BitMEXWebsocket():
                 if message['status'] == 400:
                     self.error(message['error'])
                 if message['status'] == 401:
-                    self.error("Login information or API Key incorrect, please check and restart.")
+                    self.error("API Key incorrect, please check and restart.")
             elif action:
 
                 if table not in self.data:
@@ -247,7 +249,7 @@ class BitMEXWebsocket():
 
                     # Limit the max length of the table to avoid excessive memory usage.
                     # Don't trim orders because we'll lose valuable state if we do.
-                    if table != 'order' and len(self.data[table]) > BitMEXWebsocket.MAX_TABLE_LEN:
+                    if table not in ['order', 'orderBookL2'] and len(self.data[table]) > BitMEXWebsocket.MAX_TABLE_LEN:
                         self.data[table] = self.data[table][(BitMEXWebsocket.MAX_TABLE_LEN // 2):]
 
                 elif action == 'update':
@@ -256,21 +258,26 @@ class BitMEXWebsocket():
                     for updateData in message['data']:
                         item = findItemByKeys(self.keys[table], self.data[table], updateData)
                         if not item:
-                            return  # No item found to update. Could happen before push
+                            continue  # No item found to update. Could happen before push
 
                         # Log executions
-                        is_canceled = 'ordStatus' in updateData and updateData['ordStatus'] == 'Canceled'
-                        if table == 'order' and 'leavesQty' in updateData and not is_canceled:
-                            instrument = self.get_instrument(item['symbol'])
-                            contExecuted = abs(item['leavesQty'] - updateData['leavesQty'])
-                            self.logger.info("Execution: %s %d Contracts of %s at %.*f" %
+                        if table == 'order':
+                            is_canceled = 'ordStatus' in updateData and updateData['ordStatus'] == 'Canceled'
+                            if 'cumQty' in updateData and not is_canceled:
+                                contExecuted = updateData['cumQty'] - item['cumQty']
+                                if contExecuted > 0:
+                                    instrument = self.get_instrument(item['symbol'])
+                                    self.logger.info("Execution: %s %d Contracts of %s at %.*f" %
                                              (item['side'], contExecuted, item['symbol'],
                                               instrument['tickLog'], item['price']))
 
+                        # Update this item.
                         item.update(updateData)
-                        # Remove cancelled / filled orders
+
+                        # Remove canceled / filled orders
                         if table == 'order' and item['leavesQty'] <= 0:
                             self.data[table].remove(item)
+
                 elif action == 'delete':
                     self.logger.debug('%s: deleting %s' % (table, message['data']))
                     # Locate the item in the collection and remove it.

@@ -18,14 +18,22 @@ It is free to use and modify for your own strategies. It provides the following:
 
 **Develop on [Testnet](https://testnet.bitmex.com) first!** Testnet trading is completely free and is identical to the live market.
 
+> BitMEX is not responsible for any losses incurred when using this code. This code is intended for sample purposes ONLY - do not
+  use this code for real trades unless you fully understand what it does and what its caveats are.
+
+> This is not a sophisticated market making program. It is intended to show the basics of market making while abstracting some
+  of the rote work of interacting with the BitMEX API. It does not make smart decisions and will likely lose money.
+
 Getting Started
 ---------------
 
 1. Create a [Testnet BitMEX Account](https://testnet.bitmex.com) and [deposit some TBTC](https://testnet.bitmex.com/app/deposit).
 1. Get dependencies: `python setup.py install`
-  * This will create a `settings.py` file at the root. Modify this file to tune parameters.
-1. Edit settings.py to add your BitMEX username and password and change bot parameters.
-  * Run with DRY_RUN=True to test cost and spread.
+    * This will create a `settings.py` file at the root. Modify this file to tune parameters.
+    * Alternatively, if you use `virtualenv`, create a venv and run `pip install -r requirements.txt`.
+1. Edit settings.py to add your [BitMEX API Key and Secret](https://testnet.bitmex.com/app/apiKeys) and change bot parameters.
+    * Note that user/password authentication is not supported.
+    * Run with DRY_RUN=True to test cost and spread.
 1. Run it: `./marketmaker [symbol]`
 1. Want faster authentication? Create [an API Key](https://testnet.bitmex.com/app/apiKeys)
 1. Satisfied with your bot's performance? Create a [live API Key](https://www.bitmex.com/app/apiKeys) for your
@@ -36,9 +44,9 @@ Operation Overview
 
 This market maker works on the following principles:
 
-* The MM tracks the last bidPrice and askPrice of the quoted instrument to determine where to start quoting.
+* The MM tracks the last `bidPrice` and `askPrice` of the quoted instrument to determine where to start quoting.
 * Based on parameters set the user, the bot creates a descriptions of orders it would like to place.
-  - If settings.MAINTAIN_SPREADS is set, the bot will start inside the current spread and work outwards.
+  - If `settings.MAINTAIN_SPREADS` is set, the bot will start inside the current spread and work outwards.
   - Otherwise, spread is determined by interval calculations.
 * If the user specified position limits, these are checked. If the current position is beyond a limit,
   the bot stops quoting that side of the market.
@@ -100,14 +108,22 @@ This bot uses the WebSocket and bulk order placement/amend to greatly reduce the
 
 Most calls to the API consume one request, except:
 
-* Bulk order placement/amend: Consumes 0.5 requests, rounded up, per order. For example, placing 9 orders consumes
-  5 requests.
+* Bulk order placement/amend: Consumes 0.1 requests, rounded up, per order. For example, placing 16 orders consumes
+  2 requests.
 * Bulk order cancel: Consumes 1 request no matter the size. Is not blocked by an exceeded ratelimit; cancels will
   always succeed. This bot will always cancel all orders on an error or interrupt.
 
 If you are quoting multiple contracts and your ratelimit is becoming an obstacle, please
 [email support](mailto:support@bitmex.com) with details of your quoting. In the vast majority of cases,
 we are able to raise a user's ratelimit without issue.
+
+Troubleshooting
+---------------
+
+Common errors we've seen:
+
+* `TypeError: __init__() got an unexpected keyword argument 'json'`
+  * This is caused by an outdated version of `requests`. Run `pip install requests` to update.
 
 
 Compatibility
