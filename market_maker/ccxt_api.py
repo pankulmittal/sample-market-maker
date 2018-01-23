@@ -4,6 +4,11 @@ import random
 import json
 import decimal
 import requests
+import base64
+import uuid
+import sys
+
+from time import sleep
 from ccxt import bitmex
 from datetime import datetime
 from os.path import getmtime
@@ -12,6 +17,10 @@ from market_maker.utils import log, constants, errors, math
 from market_maker.utils.math import toNearest
 from future.utils import iteritems
 from market_maker.settings import settings
+
+# Used for reloading the bot - saves modified times of key files
+import os
+watched_files_mtimes = [(f, getmtime(f)) for f in settings.WATCHED_FILES]
 
 logger = log.setup_custom_logger('root')
 
@@ -24,9 +33,13 @@ class BitMEX(bitmex):
 
     def __init__(self, *args, **kwargs):
         super(BitMEX, self).__init__(*args, **kwargs)
+        self.urls['api'] = "https://testnet.bitmex.com"
+        self.urls['www'] = "https://testnet.bitmex.com"
         self.apiKey = settings.API_KEY
         self.secret = settings.API_SECRET
-        self.symbol = "BTC/USD"
+        self.symbol = settings.SYMBOL
+        self.symbol_code = settings.SYMBOL_CODE
+        self.dry_run = settings.DRY_RUN
         self.orderIDPrefix = kwargs["orderIDPrefix"] if "orderIDPrefix" in kwargs else "mm_bitmex_"
         self.postOnly = kwargs['postOnly'] if kwargs.get("postOnly") else False
 
@@ -40,10 +53,41 @@ class BitMEX(bitmex):
         self.market = self.fetch_market()
         self.starting_qty = self.get_delta()
         self.running_qty = self.starting_qty
+        self.reset()
+
+    def reset(self):
+        self.cancel_all_orders()
         self.sanity_check()
         self.print_status()
+
+        # Create orders and converge.
         self.place_orders()
-        # self.reset()
+
+        if settings.DRY_RUN:
+            sys.exit()
+
+    def sign(self, path, api='public', method='GET', params={}, headers=None, body=None):
+        query = '/api' + '/' + self.version + '/' + path
+        if method != 'PUT':
+            if params:
+                query += '?' + self.urlencode(params)
+        url = self.urls['api'] + query
+        if api == 'private':
+            self.check_required_credentials()
+            nonce = str(self.nonce())
+            auth = method + query + nonce
+            if method in ['POST', 'PUT', "DELETE"]:
+                if params:
+                    auth += self.json(params)
+                if body:
+                    auth += self.encode(body)
+            headers = {
+                'Content-Type': 'application/json',
+                'api-nonce': nonce,
+                'api-key': self.apiKey,
+                'api-signature': self.hmac(self.encode(auth), self.encode(self.secret)),
+            }
+        return {'url': url, 'method': method, 'body': body, 'headers': headers}
 
     def get_positions(self, symbol=None):
         if symbol is None:
@@ -246,33 +290,32 @@ class BitMEX(bitmex):
         if self.long_position_limit_exceeded():
             logger.info("Long delta limit exceeded")
             logger.info("Current Position: %.f, Maximum Position: %.f" %
-                        (self.exchange.get_delta(), settings.MAX_POSITION))
+                        (self.get_delta(), settings.MAX_POSITION))
 
         if self.short_position_limit_exceeded():
             logger.info("Short delta limit exceeded")
             logger.info("Current Position: %.f, Minimum Position: %.f" %
-                        (self.exchange.get_delta(), settings.MIN_POSITION))
+                        (self.get_delta(), settings.MIN_POSITION))
 
     def get_portfolio(self):
         contracts = settings.CONTRACTS
         portfolio = {}
         for symbol in contracts:
             position = self.get_position(symbol=symbol)
-            market = self.fetch_market(symbol=symbol)
 
-            if market['info']['isQuanto']:
+            if self.market['info']['isQuanto']:
                 future_type = "Quanto"
-            elif market['info']['isInverse']:
+            elif self.market['info']['isInverse']:
                 future_type = "Inverse"
-            elif not market['info']['isQuanto'] and not market['info']['isInverse']:
+            elif not self.market['info']['isQuanto'] and not self.market['info']['isInverse']:
                 future_type = "Linear"
             else:
-                raise NotImplementedError("Unknown future type; not quanto or inverse: %s" % market['info']['symbol'])
+                raise NotImplementedError("Unknown future type; not quanto or inverse: %s" % self.market['info']['symbol'])
 
-            if market['info']['underlyingToSettleMultiplier'] is None:
-                multiplier = float(market['info']['multiplier']) / float(market['info']['quoteToSettleMultiplier'])
+            if self.market['info']['underlyingToSettleMultiplier'] is None:
+                multiplier = float(self.market['info']['multiplier']) / float(self.market['info']['quoteToSettleMultiplier'])
             else:
-                multiplier = float(market['info']['multiplier']) / float(market['info']['underlyingToSettleMultiplier'])
+                multiplier = float(self.market['info']['multiplier']) / float(self.market['info']['underlyingToSettleMultiplier'])
 
             portfolio[symbol] = {
                 "currentQty": float(position['currentQty']),
@@ -349,19 +392,17 @@ class BitMEX(bitmex):
         # Note rethrow; if this fails, we want to catch it and re-tick
         data = {"orders": orders}
         return self.request("order/bulk", api="private", method="PUT", body=json.dumps(data))
-        # return self._curl_bitmex(path='order/bulk', postdict={'orders': orders}, verb='PUT', rethrow_errors=True)
 
     def create_bulk_orders(self, orders):
         if self.dry_run:
             return orders
         for order in orders:
             order['clOrdID'] = self.orderIDPrefix + base64.b64encode(uuid.uuid4().bytes).decode('utf8').rstrip('=\n')
-            order['symbol'] = self.symbol
+            order['symbol'] = self.symbol_code
             if self.postOnly:
                 order['execInst'] = 'ParticipateDoNotInitiate'
         data = {"orders": orders}
         return self.request("order/bulk", api="private", method="POST", body=json.dumps(data))
-        # return self._curl_bitmex(path='order/bulk', postdict={'orders': orders}, verb='POST')
 
     def cancel_bulk_orders(self, orders):
         if self.dry_run:
@@ -369,7 +410,18 @@ class BitMEX(bitmex):
         orderID = [order['orderID'] for order in orders]
         data = {"orderID": orderID}
         return self.request("order", api="private", method="DELETE", body=json.dumps(data))
-        # return self._curl_bitmex(path=path, postdict=postdict, verb="DELETE")
+
+    def cancel_all_orders(self):
+        if self.dry_run:
+            return
+
+        if self.symbol:
+            data = {'symbol': self.symbol_code}
+            self.request("order/all", api="private", method="DELETE", body=json.dumps(data))
+        else:
+            self.request("order/all", api="private", method="DELETE")
+
+        sleep(settings.API_REST_INTERVAL)
 
     def prepare_order(self, index):
         """Create an order object."""
@@ -394,7 +446,7 @@ class BitMEX(bitmex):
         to_cancel = []
         buys_matched = 0
         sells_matched = 0
-        existing_orders = self.fetch_orders()
+        existing_orders = self.fetch_open_orders()
 
         # Check all existing orders and match them up with what we want to place.
         # If there's an open one, we might be able to amend it to fit what we want.
@@ -463,3 +515,47 @@ class BitMEX(bitmex):
             for order in reversed(to_cancel):
                 logger.info("%4s %d @ %.*f" % (order['side'], order['leavesQty'], tickLog, order['price']))
             self.cancel_bulk_orders(to_cancel)
+
+    def check_file_change(self):
+        """Restart if any files we're watching have changed."""
+        for f, mtime in watched_files_mtimes:
+            if getmtime(f) > mtime:
+                self.restart()
+
+    def exit(self):
+        logger.info("Shutting down. All open orders will be cancelled.")
+        try:
+            self.cancel_all_orders()
+        except errors.AuthenticationError as e:
+            logger.info("Was not authenticated; could not cancel orders.")
+        except Exception as e:
+            logger.info("Unable to cancel orders: %s" % e)
+
+        sys.exit()
+
+    def restart(self):
+        logger.info("Restarting the market maker...")
+        os.execv(sys.executable, [sys.executable] + sys.argv)
+
+    def run_loop(self):
+        while True:
+            sys.stdout.write("-----\n")
+            sys.stdout.flush()
+
+            self.check_file_change()
+            sleep(settings.LOOP_INTERVAL)
+
+            self.reset()
+            self.sanity_check()  # Ensures health of mm - several cut-out points here
+            self.print_status()  # Print skew, delta, etc
+            self.place_orders()  # Creates desired orders and converges to existing orders
+
+def run():
+    logger.info('BitMEX Market Maker Version: %s\n' % constants.VERSION)
+
+    b = BitMEX()
+    try:
+        b.init()
+        b.run_loop()
+    except (KeyboardInterrupt, SystemExit):
+        sys.exit()

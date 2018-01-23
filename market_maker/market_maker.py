@@ -382,6 +382,21 @@ class OrderManager:
             to_create.append(sell_orders[sells_matched])
             sells_matched += 1
 
+        print "++++++++++++++++++++++++++++++++++"
+        print "++++++++++++++++++++++++++++++++++"
+        print len(to_amend)
+        print "++++++++++++++++++++++++++++++++++"
+        print "++++++++++++++++++++++++++++++++++"
+        print len(to_create)
+        print "++++++++++++++++++++++++++++++++++"
+        print "++++++++++++++++++++++++++++++++++"
+        print len(to_cancel)
+        print "++++++++++++++++++++++++++++++++++"
+        print "++++++++++++++++++++++++++++++++++"
+        print len(existing_orders)
+        print "++++++++++++++++++++++++++++++++++"
+        print "++++++++++++++++++++++++++++++++++"
+
         if len(to_amend) > 0:
             for amended_order in reversed(to_amend):
                 reference_order = [o for o in existing_orders if o['orderID'] == amended_order['orderID']][0]

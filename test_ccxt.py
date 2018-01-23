@@ -1,4 +1,4 @@
-from market_maker.ccxt_api import BitMEX
+#!/usr/bin/env python
 
-b = BitMEX()
-b.init()
+from market_maker import ccxt_api
+ccxt_api.run()
