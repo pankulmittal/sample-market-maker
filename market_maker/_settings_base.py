@@ -19,6 +19,7 @@ API_SECRET = ""
 ########################################################################################################################
 
 # Instrument to market make on BitMEX.
+EXCHANGE = "BITMEX"
 SYMBOL = "XBTUSD"
 
 
